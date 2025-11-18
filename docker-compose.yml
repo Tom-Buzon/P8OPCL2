@@ -1,0 +1,72 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: optiweb_db
+    environment:
+      POSTGRES_DB: optiweb
+      POSTGRES_USER: optiweb
+      POSTGRES_PASSWORD: optiweb
+    volumes:
+      - p8_pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  mlflow:
+    image: p8-app
+    container_name: optiweb_mlflow
+    working_dir: /app
+    command: >
+      mlflow server
+        --backend-store-uri /app/mlruns
+        --default-artifact-root /app/mlruns
+        --host 0.0.0.0
+        --port 5000
+    environment:
+      MLFLOW_SECURITY_AUTHENTICATION: "disabled"
+      MLFLOW_SECURITY_AUTHORIZATION: "disabled"
+    ports:
+      - "5000:5000"
+
+  backend:
+    build: .
+    image: p8-app
+    container_name: optiweb_backend
+    command: >
+      uvicorn backend.main:app
+      --host 0.0.0.0
+      --port 8000
+    environment:
+      DATABASE_URL: postgresql://optiweb:optiweb@db:5432/optiweb
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MODEL_LIGHT_NAME: optiweb_top20
+      MODEL_MEDIUM_NAME: optiweb_top40
+      MODEL_STAGE: Staging
+
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: optiweb
+      POSTGRES_USER: optiweb
+      POSTGRES_PASSWORD: optiweb
+      
+    depends_on:
+      - db
+      - mlflow
+    ports:
+      - "8000:8000"
+
+  frontend:
+    image: p8-app
+    container_name: optiweb_frontend
+    command: >
+      streamlit run frontend/app.py
+      --server.address=0.0.0.0
+      --server.port=8501
+    environment:
+      API_URL: http://backend:8000
+    depends_on:
+      - backend
+    ports:
+      - "8501:8501"
+
+volumes:
+  p8_pgdata:

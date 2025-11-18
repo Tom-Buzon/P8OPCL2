@@ -1,0 +1,10 @@
+model_name: catboost_gpu
+params:
+  depth: 6
+  devices: '0'
+  eval_metric: AUC
+  iterations: 300
+  learning_rate: 0.07
+  random_seed: 42
+  task_type: GPU
+  verbose: false

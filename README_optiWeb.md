@@ -62,32 +62,44 @@ streamlit run app.py
 
 ### dockerisation
 
-Pour des raison de mémoires etc, je vais utiliser ce qui est en local dans mon pc : je n'aurais donc pas besoin de relancer les runs mlflow.
-Si on veux embarquer les experiences dans docker, il faut monter les volumes. ( Et re run toutes les experiences)
+On a un .dockerignore qui permet de pas prendre tout le dossier.
+On set via un dockerfile ou build l'image et ou on re-root touts les artefact ( chemin windows vers chemin linux)
+On a le compose pour les container séparé.
+l'idée :
+-db pg sur 5432
+-mlfloiw sur 5000
+-backend sur 8000
+-frontend sur 8501
+
+=> tout run complétement en vm.
 
 
-1. anticipation des probleme de port :
-  ( faire en sorte que le dockerfile remap correctement les ports dont nous aurons besoin :
-      - mlflow
-      - streamlit
-      - Pg
-      - api
-      )
+**build up**
+docker compose build 
+docker compose up
+===> vérification log en base :
+copmmande a exec dans le container de la base pg: ou avec "docker exec -it optiweb_db"
+**mode sql**
+psql -U optiweb -d optiweb 
 
-2. anticipation route predict save log dans pg
-  ( vérifier si table existe & insert)
-  ( pas de crud complet just C )
-  == necessite d'avoir des log de perf
-  == je pense qu'on peut tout intercepter depuis predict mais a verifier
+**forme de la table**
+prediction_logs;  
 
-3. 
-
+**selection**
+SELECT * FROM prediction_logs ORDER BY created_at DESC LIMIT 10;
+=> ça fait beacoup donc juste selet id pour voir combien de ligne
 
 
 
+### data-drift
+
+dossier datadrif
+analyse du drift avec l'utilisation du framework evidently
+ (notebook qui compare tout X_train a X_test + version light avec un top 10 )
+===> drift_evidently_067.ipynb
+
+ps: je vais ajouter un rapport avec le top 40 du topk.
 
 
-
-
-  
-
+===> 🤯 on a frolé la catastrophe ^^ 
+Non je riogole : il faut mettre les dossier dans la root pour que ca passe bien (jai debug pendant une heur pour comprendre ahahaha) (./input vs ../input ❤️, la classique)

@@ -2,38 +2,29 @@
 
 import os
 import time
-import logging
+import json
+import uuid
 from enum import Enum
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Optional
 
 import mlflow
+import psycopg2
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
 from mlflow.lightgbm import load_model as load_lgbm
 
 # ======================================
-# 1. Logging global
-# ======================================
-
-logger = logging.getLogger("optiweb")
-if not logger.handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    )
-
-# ======================================
-# 2. Config MLflow & features
+# 1. Config MLflow & modèles
 # ======================================
 
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
 MODEL_LIGHT_NAME = "optiweb_top20"
-MODEL_MED_NAME = "optiweb_top40"
-MODEL_STAGE = "Staging"  # stage utilisé dans le notebook
+MODEL_MED_NAME   = "optiweb_top40"
+MODEL_STAGE      = "Staging"
 
 TOP20_FEATURES: List[str] = [
     "PAYMENT_RATE",
@@ -101,7 +92,7 @@ TOP40_FEATURES: List[str] = [
     "APPROVED_DAYS_DECISION_MAX",
 ]
 
-FEATURES_BY_MODE: Dict[str, List[str]] = {
+FEATURES_BY_MODE = {
     "light": TOP20_FEATURES,
     "med": TOP40_FEATURES,
 }
@@ -109,67 +100,96 @@ FEATURES_BY_MODE: Dict[str, List[str]] = {
 # Colonnes que MLflow attend explicitement en integer
 INT_FEATURES = ["DAYS_BIRTH", "DAYS_ID_PUBLISH", "CODE_GENDER"]
 
-# Cache des modèles (lazy-loading)
-_MODELS_CACHE: Dict[str, Any] = {"light": None, "med": None}
 
-
-def _load_model_from_registry(model_name: str, stage: str):
+def load_model_from_registry(model_name: str, stage: str):
     model_uri = f"models:/{model_name}/{stage}"
-    logger.info(f"[ModelLoader] Loading model from: {model_uri}")
-    model = load_lgbm(model_uri)
-    logger.info(f"[ModelLoader] Model '{model_name}' loaded.")
-    return model
+    return load_lgbm(model_uri)
 
 
-def _get_model_and_features(mode: "ModeEnum") -> Tuple[Any, List[str], str]:
-    """Retourne (model, expected_features, model_name) pour un mode donné."""
-    if mode == ModeEnum.light:
-        model_name = MODEL_LIGHT_NAME
-        feats = FEATURES_BY_MODE["light"]
-        key = "light"
-    elif mode == ModeEnum.med:
-        model_name = MODEL_MED_NAME
-        feats = FEATURES_BY_MODE["med"]
-        key = "med"
-    else:
-        raise HTTPException(status_code=400, detail="Mode 'full' non encore disponible")
+model_light = load_model_from_registry(MODEL_LIGHT_NAME, MODEL_STAGE)
+model_med   = load_model_from_registry(MODEL_MED_NAME, MODEL_STAGE)
 
-    if _MODELS_CACHE[key] is None:
-        _MODELS_CACHE[key] = _load_model_from_registry(model_name, MODEL_STAGE)
+# ======================================
+# 2. Connexion Postgres & table logs
+# ======================================
 
-    return _MODELS_CACHE[key], feats, model_name
+DB_ENABLED = False
+DB_CONN = None
 
+POSTGRES_HOST = os.getenv("POSTGRES_HOST")
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
+POSTGRES_DB = os.getenv("POSTGRES_DB")
+POSTGRES_USER = os.getenv("POSTGRES_USER")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
+
+
+def _init_db():
+    global DB_ENABLED, DB_CONN
+    if not (POSTGRES_HOST and POSTGRES_DB and POSTGRES_USER and POSTGRES_PASSWORD):
+        print("[DB] Env vars manquantes, logging Postgres désactivé.")
+        DB_ENABLED = False
+        return
+
+    dsn = (
+        f"host={POSTGRES_HOST} "
+        f"port={POSTGRES_PORT} "
+        f"dbname={POSTGRES_DB} "
+        f"user={POSTGRES_USER} "
+        f"password={POSTGRES_PASSWORD}"
+    )
+
+    try:
+        conn = psycopg2.connect(dsn)
+        conn.autocommit = True
+        DB_CONN = conn
+        DB_ENABLED = True
+        print("[DB] Connexion Postgres OK, création de la table prediction_logs si besoin...")
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS prediction_logs (
+                    id UUID PRIMARY KEY,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    mode VARCHAR(10) NOT NULL,
+                    model_name TEXT NOT NULL,
+                    features JSONB NOT NULL,
+                    probability DOUBLE PRECISION,
+                    raw_output DOUBLE PRECISION,
+                    latency_ms DOUBLE PRECISION,
+                    client_ip TEXT,
+                    user_agent TEXT,
+                    status_code INTEGER,
+                    error_message TEXT
+                );
+                """
+            )
+    except Exception as e:
+        DB_ENABLED = False
+        DB_CONN = None
+        print("[DB] Échec connexion Postgres, logging désactivé:", repr(e))
+
+
+_init_db()
 
 # ======================================
 # 3. FastAPI app & schémas
 # ======================================
 
-app = FastAPI(
-    title="OptiWeb API",
-    version="1.0.0",
-    description=(
-        "API de scoring OptiWeb.\n\n"
-        "- `/health` : statut de l'API\n"
-        "- `/predict` : scoring Light/Medium (top-K features)\n\n"
-        "Documentation interactive : /docs (Swagger) ou /redoc."
-    ),
-)
+app = FastAPI(title="OptiWeb API", version="1.0.0")
 
 
 class ModeEnum(str, Enum):
     light = "light"
     med = "med"
-    full = "full"  # en développement
+    full = "full"
 
 
 class PredictRequest(BaseModel):
-    mode: ModeEnum = Field(
-        ...,
-        description="light = top20, med = top40, full = non disponible",
-    )
+    mode: ModeEnum = Field(..., description="light = top20, med = top40, full = non dispo")
     features: Dict[str, float] = Field(
         ...,
-        description="Dictionnaire {feature_name: value} correspondant aux features attendues.",
+        description="Dictionnaire {feature_name: value}",
     )
 
 
@@ -183,26 +203,7 @@ class PredictResponse(BaseModel):
 
 
 # ======================================
-# 4. Healthcheck
-# ======================================
-
-@app.get("/health", tags=["system"])
-def health():
-    return {
-        "status": "ok",
-        "models_cached": {
-            "light": _MODELS_CACHE["light"] is not None,
-            "med": _MODELS_CACHE["med"] is not None,
-        },
-        "model_names": {
-            "light": MODEL_LIGHT_NAME,
-            "med": MODEL_MED_NAME,
-        },
-    }
-
-
-# ======================================
-# 5. Logging prédictions (prêt pour PostgreSQL plus tard)
+# 4. Helpers logging
 # ======================================
 
 def build_prediction_log_entry(
@@ -212,58 +213,103 @@ def build_prediction_log_entry(
     proba: float,
     raw_output: float,
     latency_ms: float,
-) -> Dict[str, Any]:
-    """Construit un dictionnaire de log complet pour une prédiction."""
+    client_ip: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    status_code: int = 200,
+    error_message: Optional[str] = None,
+) -> Dict:
     return {
-        "mode": mode.value,
+        "id": str(uuid.uuid4()),
+        "mode": mode.value if isinstance(mode, ModeEnum) else str(mode),
         "model_name": model_name,
-        "probability": proba,
-        "raw_output": raw_output,
-        "latency_ms": latency_ms,
+        "features": features,
+        "probability": float(proba),
+        "raw_output": float(raw_output),
+        "latency_ms": float(latency_ms),
+        "client_ip": client_ip,
+        "user_agent": user_agent,
+        "status_code": status_code,
+        "error_message": error_message,
         "n_features": len(features),
-        "features": features,  # on garde les inputs pour les logs/DB
     }
 
 
-def log_prediction(entry: Dict[str, Any]) -> None:
-    """
-    Pour l'instant : log JSON dans les logs applicatifs.
-    Plus tard : écriture dans PostgreSQL depuis ici.
-    """
-    logger.info(f"[Prediction] {entry}")
+def save_prediction_log(entry: Dict):
+    if not DB_ENABLED or DB_CONN is None:
+        # Logging désactivé → on ne fait rien
+        return
+
+    try:
+        with DB_CONN.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO prediction_logs (
+                    id, mode, model_name, features,
+                    probability, raw_output, latency_ms,
+                    client_ip, user_agent, status_code, error_message
+                )
+                VALUES (%(id)s, %(mode)s, %(model_name)s, %(features)s::jsonb,
+                        %(probability)s, %(raw_output)s, %(latency_ms)s,
+                        %(client_ip)s, %(user_agent)s, %(status_code)s, %(error_message)s)
+                """,
+                {
+                    "id": entry["id"],
+                    "mode": entry["mode"],
+                    "model_name": entry["model_name"],
+                    "features": json.dumps(entry["features"]),
+                    "probability": entry["probability"],
+                    "raw_output": entry["raw_output"],
+                    "latency_ms": entry["latency_ms"],
+                    "client_ip": entry.get("client_ip"),
+                    "user_agent": entry.get("user_agent"),
+                    "status_code": entry.get("status_code", 200),
+                    "error_message": entry.get("error_message"),
+                },
+            )
+    except Exception as e:
+        print("[DB] Erreur lors de l'INSERT dans prediction_logs:", repr(e))
 
 
 # ======================================
-# 6. Predict endpoint
+# 5. Endpoints
 # ======================================
 
-@app.post("/predict", response_model=PredictResponse, tags=["scoring"])
-def predict(req: PredictRequest):
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "models": {"light": MODEL_LIGHT_NAME, "med": MODEL_MED_NAME},
+        "db_logging": DB_ENABLED,
+        "mlflow_uri": MLFLOW_TRACKING_URI,
+    }
+
+
+def _select_model_and_features(mode: ModeEnum):
+    if mode == ModeEnum.light:
+        return model_light, FEATURES_BY_MODE["light"]
+    if mode == ModeEnum.med:
+        return model_med, FEATURES_BY_MODE["med"]
+    raise HTTPException(status_code=400, detail="Mode 'full' non encore disponible")
+
+
+@app.post("/predict", response_model=PredictResponse)
+def predict(req: PredictRequest, request: Request):
 
     if req.mode == ModeEnum.full:
         raise HTTPException(status_code=400, detail="Mode 'full' en développement")
 
-    model, expected_features, model_name = _get_model_and_features(req.mode)
+    model, expected_features = _select_model_and_features(req.mode)
 
-    # Vérification des features
+    # Vérif features présentes
     missing = [f for f in expected_features if f not in req.features]
-    extra = [f for f in req.features.keys() if f not in expected_features]
-
     if missing:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Missing features: {missing}",
-        )
+        raise HTTPException(status_code=422, detail=f"Missing features: {missing}")
 
-    # On ignore silencieusement les features en trop (mais on les garde dans le log brut)
-    if extra:
-        logger.warning(f"Extra features ignorées: {extra}")
+    # Construction DataFrame
+    ordered_dict = {f: req.features[f] for f in expected_features}
+    X_df = pd.DataFrame([ordered_dict])
 
-    # Construction du DataFrame dans le BON ordre
-    ordered_features = {f: req.features[f] for f in expected_features}
-    X_df = pd.DataFrame([ordered_features])
-
-    # Harmonisation des dtypes (schema MLflow)
+    # Dtypes MLflow:
     for col in INT_FEATURES:
         if col in X_df.columns:
             X_df[col] = X_df[col].round().astype("int32")
@@ -273,27 +319,31 @@ def predict(req: PredictRequest):
     if float_cols:
         X_df[float_cols] = X_df[float_cols].astype("float32")
 
-    # Mesure de la latence
+    # Mesure du temps de prédiction
     t0 = time.perf_counter()
     proba_1 = float(model.predict_proba(X_df)[:, 1][0])
     latency_ms = (time.perf_counter() - t0) * 1000.0
 
     proba = max(0.0, min(1.0, proba_1))
 
-    # Log structuré (prêt pour PostgreSQL)
+    # Construction + sauvegarde log
     log_entry = build_prediction_log_entry(
         mode=req.mode,
-        model_name=model_name,
-        features=ordered_features,
+        model_name=MODEL_LIGHT_NAME if req.mode == ModeEnum.light else MODEL_MED_NAME,
+        features=req.features,
         proba=proba,
         raw_output=proba_1,
         latency_ms=latency_ms,
+        client_ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        status_code=200,
+        error_message=None,
     )
-    log_prediction(log_entry)
+    save_prediction_log(log_entry)
 
     return PredictResponse(
         mode=req.mode,
-        model_name=model_name,
+        model_name=log_entry["model_name"],
         probability=proba,
         raw_output=proba_1,
         used_features=expected_features,

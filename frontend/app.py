@@ -1,10 +1,11 @@
 # frontend/app.py
-
+import os
 import json
 import requests
 import streamlit as st
+from pathlib import Path
 
-API_URL = "http://localhost:8000"  # FastAPI
+API_URL = os.getenv("API_URL", "http://localhost:8000") # FastAPI
 
 # 👉 Même listes que côté backend
 TOP20_FEATURES = [
@@ -82,8 +83,11 @@ FEATURES_BY_MODE = {
 # Charger le feature_meta.json
 # ======================================
 
+BASE_DIR = Path(__file__).resolve().parent.parent   # /app/frontend -> parent.parent = /app
+FEATURE_META_PATH = BASE_DIR / "feature_meta.json"
+
 try:
-    with open("../feature_meta.json", "r") as f:
+    with open(FEATURE_META_PATH, "r") as f:
         FEATURE_META = json.load(f)
     meta_loaded = True
 except FileNotFoundError:
