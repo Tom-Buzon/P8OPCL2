@@ -6,6 +6,7 @@ on:
     paths:
       - 'backend/**'
       - 'app/**'
+      - 'tests/**'
       - 'pyproject.toml'
       - '.github/workflows/backend-ci.yml'
 
@@ -29,7 +30,6 @@ jobs:
           poetry export -f requirements.txt --without-hashes -o requirements.txt
           pip install -r requirements.txt
 
-      - name: Run backend tests
+      - name: Run backend tests (unitaires légers)
         run: |
-          pytest backend/test_api.py
-          # ou : python backend/test_api.py si tu n'utilises pas pytest
+          pytest tests/test_api.py
