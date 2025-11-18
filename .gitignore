@@ -1,0 +1,35 @@
+
+
+
+# --- Environnements / secrets ---
+.venv/
+venv/
+.env
+
+
+# Bytecode Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# VS Code / IDE
+.vscode/
+.idea/
+
+# Données brutes volumineuses
+input/
+mlruns/
+reports/
+
+
+
+
+# Checkpoints notebooks
+.ipynb_checkpoints/
+
+# Fichiers temporaires
+*.log
+*.tmp
+
+.lock
