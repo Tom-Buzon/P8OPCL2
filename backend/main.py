@@ -350,4 +350,4 @@ def predict(req: PredictRequest, request: Request):
         latency_ms=latency_ms,
     )
 
-# change to triger pipeline
+# change to triger pipeline aze
