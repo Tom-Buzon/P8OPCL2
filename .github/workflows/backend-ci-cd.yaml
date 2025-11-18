@@ -36,4 +36,4 @@ jobs:
 
       - name: Run backend tests (unitaires légers)
         run: |
-          python -m pytest tests/test_backend_basics.py
+          python -m pytest tests/test_backend_basic.py
